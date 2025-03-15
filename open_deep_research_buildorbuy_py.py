@@ -39,7 +39,7 @@ LINKUP_API_KEY = os.getenv("LINKUP_API_KEY")
 
 # ## Task 1: State
 # 
-# The state structure organizes all the information needed to generate and refine a report on a given topic through multiple steps. Here’s a breakdown:
+# The state structure organizes all the information needed to generate and refine a report on a given topic through multiple steps. Here's a breakdown:
 # 
 # - **Report-Level State:**  
 #   - **Topic:** The overall subject of the report.  
@@ -51,7 +51,7 @@ LINKUP_API_KEY = os.getenv("LINKUP_API_KEY")
 # 
 # - **Section-Level State:**  
 #   For each report section, the state captures:  
-#   - **Section Details:** Including the section’s name, a brief overview (description), a flag indicating if web research should be performed, and the actual content.  
+#   - **Section Details:** Including the section's name, a brief overview (description), a flag indicating if web research should be performed, and the actual content.  
 #   - **Search Process:** The number of search iterations that have been executed and a list of search queries used to gather information.  
 #   - **Source Content:** A formatted string containing the relevant material obtained from web searches.  
 #   - **Integration:** Both the research-derived content and the list of fully completed sections are tracked to ensure they can be merged into the overall report.
@@ -72,7 +72,7 @@ class Section(BaseModel):
         description="Name for this section of the report.",
     )
     description: str = Field(
-        description="Brief overview of the main topics and concepts to be covered in this section.",
+        description="Brief overview of the build or buy analysis covered in this section.",
     )
     research: bool = Field(
         description="Whether to perform web research for this section of the report."
@@ -103,13 +103,13 @@ class Feedback(BaseModel):
     )
 
 class ReportStateInput(TypedDict):
-    topic: str # Report topic
+    capability: str # Report topic
 
 class ReportStateOutput(TypedDict):
     final_report: str # Final report
 
 class ReportState(TypedDict):
-    topic: str # Report topic    
+    capability: str # Report topic    
     feedback_on_report_plan: str # Feedback on the report plan
     sections: list[Section] # List of report sections 
     completed_sections: Annotated[list, operator.add] # Send() API key
@@ -117,7 +117,7 @@ class ReportState(TypedDict):
     final_report: str # Final report
 
 class SectionState(TypedDict):
-    topic: str # Report topic
+    capability: str # Report topic
     section: Section # Report section  
     search_iterations: int # Number of search iterations done
     search_queries: list[SearchQuery] # List of search queries
@@ -163,7 +163,7 @@ def get_config_value(value):
     return value if isinstance(value, str) else value.value
 
 
-# This function filters a configuration dictionary so that it only includes parameters that are allowed for a specific search API. It works by looking up a list of accepted parameter names for the given API (like “exa” or “pubmed”) and then stripping out any other entries from the configuration. If no configuration is provided, it simply returns an empty dictionary. This ensures that only valid and expected parameters are sent to the API.
+# This function filters a configuration dictionary so that it only includes parameters that are allowed for a specific search API. It works by looking up a list of accepted parameter names for the given API (like "exa" or "pubmed") and then stripping out any other entries from the configuration. If no configuration is provided, it simply returns an empty dictionary. This ensures that only valid and expected parameters are sent to the API.
 
 # In[5]:
 
@@ -205,7 +205,7 @@ def get_search_params(search_api: str, search_api_config: Optional[Dict[str, Any
 # In[6]:
 
 
-def deduplicate_and_format_sources(search_response, max_tokens_per_source, include_raw_content=True):
+def deduplicate_and_format_sources(search_response, max_tokens_per_source, include_raw_content=False):
     """
     Takes a list of search responses and formats them into a readable string.
     Limits the raw_content to approximately max_tokens_per_source.
@@ -254,7 +254,7 @@ def deduplicate_and_format_sources(search_response, max_tokens_per_source, inclu
     return formatted_text.strip()
 
 
-# Designed to help organize documentation or reports, this function takes a list of section objects and turns them into a well-formatted string. For each section, it prints a header with the section number and name, followed by its description, any research notes, and the main content (or a placeholder if the content isn’t written yet). The output is clearly separated by visual dividers, making it easy to read and understand the structure of the document.
+# Designed to help organize documentation or reports, this function takes a list of section objects and turns them into a well-formatted string. For each section, it prints a header with the section number and name, followed by its description, any research notes, and the main content (or a placeholder if the content isn't written yet). The output is clearly separated by visual dividers, making it easy to read and understand the structure of the document.
 
 # In[7]:
 
@@ -639,7 +639,7 @@ async def exa_search(search_queries, max_characters: Optional[int] = None, num_r
     return search_docs
 
 
-# This function is tailored for searching academic papers on arXiv. It runs asynchronously, so it can handle multiple queries without blocking. For each search query, it initializes an arXiv retriever that gathers documents along with their metadata (like authors, publication dates, and summaries). The results are then formatted to include useful details such as a link to the paper and even a link to the PDF if available. It also assigns a relevance score to each paper and respects arXiv’s rate limits by adding delays between requests.
+# This function is tailored for searching academic papers on arXiv. It runs asynchronously, so it can handle multiple queries without blocking. For each search query, it initializes an arXiv retriever that gathers documents along with their metadata (like authors, publication dates, and summaries). The results are then formatted to include useful details such as a link to the paper and even a link to the PDF if available. It also assigns a relevance score to each paper and respects arXiv's rate limits by adding delays between requests.
 
 # In[11]:
 
@@ -990,19 +990,22 @@ from typing import Any, Optional, Dict
 from langchain_core.runnables import RunnableConfig
 from dataclasses import dataclass
 
-DEFAULT_REPORT_STRUCTURE = """Use this structure to create a report on the user-provided topic:
+DEFAULT_REPORT_STRUCTURE = """Use this structure to create an analysis report for build or buy decision of a capability:
 
 1. Introduction (no research needed)
-   - Brief overview of the topic area
+   - Brief overview of the capability
 
 2. Main Body Sections:
-   - Each section should focus on a sub-topic of the user-provided topic
+   - One section that focused on the buy options for the capability
+   - One section that focuss on the build options for the capability
+   - One section that compares the buy and build options
+   
 
 3. Conclusion
    - Aim for 1 structural element (either a list of table) that distills the main body sections 
    - Provide a concise summary of the report
 
-Provide a paragraph with no more than 500 words to describe the key take aways on the topic"""
+Provide a paragraph with no more than 500 words to describe the key take aways on the analysis of the build or buy decision"""
 
 class SearchAPI(Enum):
     PERPLEXITY = "perplexity"
@@ -1073,22 +1076,22 @@ class Configuration:
 
 
 # Prompt to generate search queries to help with planning the report
-report_planner_query_writer_instructions="""You are performing research for a report. 
+report_planner_query_writer_instructions="""You are performing an analysis of a build or buy decision report for a capability.
 
-<Report topic>
-{topic}
-</Report topic>
+<Capability>
+{capability}
+</Capability>
 
 <Report organization>
 {report_organization}
 </Report organization>
 
 <Task>
-Your goal is to generate {number_of_queries} web search queries that will help gather information for planning the report sections. 
+Your goal is to generate {number_of_queries} web search queries that will help gather information for planning the analysis report of the build or buy decision. 
 
 The queries should:
 
-1. Be related to the Report topic
+1. Be related to the Capability
 2. Help satisfy the requirements specified in the report organization
 
 Make the queries specific enough to find high-quality, relevant sources while covering the breadth needed for the report structure.
@@ -1096,12 +1099,12 @@ Make the queries specific enough to find high-quality, relevant sources while co
 """
 
 # Prompt to generate the report plan
-report_planner_instructions="""I want a plan for a report that is concise and focused.
+report_planner_instructions="""I want a plan for an analysis report that is concise and focused.
 
-<Report topic>
-The topic of the report is:
-{topic}
-</Report topic>
+<Capability>
+The capability that I am considering to build or buy is:
+{capability}
+</Capability>
 
 <Report organization>
 The report should follow this organization: 
@@ -1114,24 +1117,24 @@ Here is context to use to plan the sections of the report:
 </Context>
 
 <Task>
-Generate a list of sections for the report. Your plan should be tight and focused with NO overlapping sections or unnecessary filler. 
+Generate a list of sections for the analysis report of the build or buy decision. Your plan should be tight and focused with NO overlapping sections or unnecessary filler. 
 
 For example, a good report structure might look like:
 1/ intro
-2/ overview of topic A
-3/ overview of topic B
+2/ overview section of buy options A
+4/ overview section of build options B
 4/ comparison between A and B
 5/ conclusion
 
 Each section should have the fields:
 
 - Name - Name for this section of the report.
-- Description - Brief overview of the main topics covered in this section.
+- Description - Brief overview of the build or buy options covered in this section.
 - Research - Whether to perform web research for this section of the report.
 - Content - The content of the section, which you will leave blank for now.
 
 Integration guidelines:
-- Include examples and implementation details within main topic sections, not as separate sections
+- Include examples and implementation details within main build or buy options sections, not as separate sections
 - Ensure each section has a distinct purpose with no content overlap
 - Combine related concepts rather than separating them
 
@@ -1145,11 +1148,11 @@ Here is feedback on the report structure from review (if any):
 """
 
 # Query writer instructions
-query_writer_instructions="""You are an expert technical writer crafting targeted web search queries that will gather comprehensive information for writing a technical report section.
+query_writer_instructions="""You are a business leader crafting targeted web search queries that will gather comprehensive information for writing a section of an analysis report of a build or buy decision.
 
-<Report topic>
-{topic}
-</Report topic>
+<Capability>
+{capability}
+</Capability>
 
 <Section topic>
 {section_topic}
@@ -1160,19 +1163,19 @@ Your goal is to generate {number_of_queries} search queries that will help gathe
 
 The queries should:
 
-1. Be related to the topic 
-2. Examine different aspects of the topic
+1. Be related to the Capability
+2. Examine different aspects of the Capability
 
 Make the queries specific enough to find high-quality, relevant sources.
 </Task>
 """
 
 # Section writer instructions
-section_writer_instructions = """You are an expert technical writer crafting one section of a technical report.
+section_writer_instructions = """You are an expert business writer crafting one section of an analysis report of a build or buy decision.
 
-<Report topic>
-{topic}
-</Report topic>
+<Capability>
+{capability}
+</Capability>
 
 <Section name>
 {section_name}
@@ -1198,7 +1201,7 @@ section_writer_instructions = """You are an expert technical writer crafting one
 <Length and style>
 - Strict 150-200 word limit
 - No marketing language
-- Technical focus
+- Business focus
 - Write in simple, clear language
 - Start with your most important insight in **bold**
 - Use short paragraphs (2-3 sentences max)
@@ -1227,9 +1230,9 @@ section_writer_instructions = """You are an expert technical writer crafting one
 # Instructions for section grading
 section_grader_instructions = """Review a report section relative to the specified topic:
 
-<Report topic>
-{topic}
-</Report topic>
+<Capability>
+{capability}
+</Capability>
 
 <section topic>
 {section_topic}
@@ -1255,11 +1258,11 @@ If the section content does not adequately address the section topic, generate {
 </format>
 """
 
-final_section_writer_instructions="""You are an expert technical writer crafting a section that synthesizes information from the rest of the report.
+final_section_writer_instructions="""You are a business expert writer crafting a section that synthesizes information from the rest of the analysis report of a build or buy decision.
 
-<Report topic>
-{topic}
-</Report topic>
+<Capability>
+{capability}
+</Capability>
 
 <Section name>
 {section_name}
@@ -1349,7 +1352,7 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
     """ Generate the report plan """
 
     # Inputs
-    topic = state["topic"]
+    capability = state["capability"]
     feedback = state.get("feedback_on_report_plan", None)
 
     # Get configuration
@@ -1371,7 +1374,7 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
     structured_llm = writer_model.with_structured_output(Queries)
 
     # Format system instructions
-    system_instructions_query = report_planner_query_writer_instructions.format(topic=topic, report_organization=report_structure, number_of_queries=number_of_queries)
+    system_instructions_query = report_planner_query_writer_instructions.format(capability=capability, report_organization=report_structure, number_of_queries=number_of_queries)
 
     # Generate queries  
     results = structured_llm.invoke([SystemMessage(content=system_instructions_query),
@@ -1400,7 +1403,7 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
         raise ValueError(f"Unsupported search API: {search_api}")
 
     # Format system instructions
-    system_instructions_sections = report_planner_instructions.format(topic=topic, report_organization=report_structure, context=source_str, feedback=feedback)
+    system_instructions_sections = report_planner_instructions.format(capability=capability, report_organization=report_structure, context=source_str, feedback=feedback)
 
     # Set the planner
     planner_provider = get_config_value(configurable.planner_provider)
@@ -1460,7 +1463,7 @@ def human_feedback(state: ReportState, config: RunnableConfig) -> Command[Litera
     """ Get feedback on the report plan """
 
     # Get sections
-    topic = state["topic"]
+    capability = state["capability"]     # Get system from state
     sections = state['sections']
     sections_str = "\n\n".join(
         f"Section: {section.name}\n"
@@ -1480,9 +1483,9 @@ def human_feedback(state: ReportState, config: RunnableConfig) -> Command[Litera
     if isinstance(feedback, bool) and feedback is True:
         # Treat this as approve and kick off section writing
         return Command(goto=[
-            Send("build_section_with_web_research", {"topic": topic, "section": s, "search_iterations": 0}) 
+            Send("build_section_with_web_research", {"capability": capability, "section": s, "search_iterations": 0}) 
             for s in sections 
-            if s.research
+            if s.research   
         ])
 
     # If the user provides feedback, regenerate the report plan 
@@ -1511,7 +1514,7 @@ def generate_queries(state: SectionState, config: RunnableConfig):
     """ Generate search queries for a report section """
 
     # Get state 
-    topic = state["topic"]
+    capability = state["capability"]
     section = state["section"]
 
     # Get configuration
@@ -1525,7 +1528,7 @@ def generate_queries(state: SectionState, config: RunnableConfig):
     structured_llm = writer_model.with_structured_output(Queries)
 
     # Format system instructions
-    system_instructions = query_writer_instructions.format(topic=topic, 
+    system_instructions = query_writer_instructions.format(capability=capability, 
                                                            section_topic=section.description, 
                                                            number_of_queries=number_of_queries)
 
@@ -1612,7 +1615,7 @@ def write_section(state: SectionState, config: RunnableConfig) -> Command[Litera
     """ Write a section of the report """
 
     # Get state 
-    topic = state["topic"]
+    capability = state["capability"]
     section = state["section"]
     source_str = state["source_str"]
 
@@ -1620,7 +1623,7 @@ def write_section(state: SectionState, config: RunnableConfig) -> Command[Litera
     configurable = Configuration.from_runnable_config(config)
 
     # Format system instructions
-    system_instructions = section_writer_instructions.format(topic=topic, 
+    system_instructions = section_writer_instructions.format(capability=capability, 
                                                              section_name=section.name, 
                                                              section_topic=section.description, 
                                                              context=source_str, 
@@ -1641,7 +1644,7 @@ def write_section(state: SectionState, config: RunnableConfig) -> Command[Litera
                                If the grade is 'pass', return empty strings for all follow-up queries.
                                If the grade is 'fail', provide specific search queries to gather missing information."""
 
-    section_grader_instructions_formatted = section_grader_instructions.format(topic=topic, 
+    section_grader_instructions_formatted = section_grader_instructions.format(capability=capability, 
                                                                                section_topic=section.description,
                                                                                section=section.content, 
                                                                                number_of_follow_up_queries=configurable.number_of_queries)
@@ -1707,12 +1710,12 @@ def write_final_sections(state: SectionState, config: RunnableConfig):
     configurable = Configuration.from_runnable_config(config)
 
     # Get state 
-    topic = state["topic"]
+    capability = state["capability"]
     section = state["section"]
     completed_report_sections = state["report_sections_from_research"]
 
     # Format system instructions
-    system_instructions = final_section_writer_instructions.format(topic=topic, section_name=section.name, section_topic=section.description, context=completed_report_sections)
+    system_instructions = final_section_writer_instructions.format(capability=capability, section_name=section.name, section_topic=section.description, context=completed_report_sections)
 
     # Generate section  
     writer_provider = get_config_value(configurable.writer_provider)
@@ -1771,7 +1774,7 @@ def initiate_final_section_writing(state: ReportState):
 
     # Kick off section writing in parallel via Send() API for any sections that do not require research
     return [
-        Send("write_final_sections", {"topic": state["topic"], "section": s, "report_sections_from_research": state["report_sections_from_research"]}) 
+        Send("write_final_sections", {"capability": state["capability"], "section": s, "report_sections_from_research": state["report_sections_from_research"]}) 
         for s in state["sections"] 
         if not s.research
     ]
@@ -1868,7 +1871,7 @@ thread_id = str(uuid.uuid4())
 async def run_graph_and_show_report():
     """Run the graph and display the final report when it appears"""
     async for chunk in graph_with_checkpoint.astream(
-        {"topic": "DeepSeek-R1"}, 
+        {"system": "DeepSeek-R1"}, 
         {"configurable": {"thread_id": thread_id}},
         stream_mode="updates"
     ):
@@ -1958,3 +1961,298 @@ async def provide_feedback(feedback_text):
 
 #await approve_plan()
 
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
+
+async def run_research(capability_input: str):
+    """Run the research process directly"""
+    config = {
+        "configurable": {
+            "thread_id": str(uuid.uuid4()),
+            "planner_provider": "openai",
+            "writer_provider": "openai",
+            "search_api": "tavily",
+            "planner_model": "gpt-4o",
+            "writer_model": "gpt-4o",
+            "method": "function_calling"  # Changed from json_schema to function_calling
+        }
+    }
+
+    memory = MemorySaver()
+    graph = builder.compile(checkpointer=memory)
+    
+    try:
+        async for chunk in graph.astream(
+            {"capability": capability_input},  
+            config,
+            stream_mode="updates"
+        ):
+            if isinstance(chunk, dict):
+                if 'final_report' in chunk:
+                    try:
+                        display(Markdown(f"# {capability_input} Report\n\n{chunk['final_report']}"))
+                    except NameError:  # If not in IPython environment
+                        print(f"\n{capability_input} Report")
+                        print("=" * 80)
+                        print(chunk['final_report'])
+                    return chunk['final_report']
+                elif '__interrupt__' in chunk:
+                    print("\nResearch Plan:")
+                    print(chunk['__interrupt__'][0].value)
+                    approval = input("\nDo you approve this plan? (yes/no): ").lower()
+                    if approval == 'yes':
+                        async for response in graph.astream(
+                            Command(resume=True),
+                            config,
+                            stream_mode="updates"
+                        ):
+                            if isinstance(response, dict):
+                                if 'final_report' in response:
+                                    try:
+                                        display(Markdown(f"# {capability_input} Report\n\n{response['final_report']}"))
+                                    except NameError:  # If not in IPython environment
+                                        print(f"\n{capability_input} Report")
+                                        print("=" * 80)
+                                        print(response['final_report'])
+                                    return response['final_report']
+                                else:
+                                    print(f"\nProgress: {str(response)}")
+                    else:
+                        feedback = input("\nPlease provide feedback for the plan: ")
+                        async for response in graph.astream(
+                            Command(resume=feedback),
+                            config,
+                            stream_mode="updates"
+                        ):
+                            if isinstance(response, dict):
+                                if 'final_report' in response:
+                                    try:
+                                        display(Markdown(f"# {capability_input} Report\n\n{response['final_report']}"))
+                                    except NameError:  # If not in IPython environment
+                                        print(f"\n{capability_input} Report")
+                                        print("=" * 80)
+                                        print(response['final_report'])
+                                    return response['final_report']
+                                else:
+                                    print(f"\nProgress: {str(response)}")
+                else:
+                    print(f"\nProgress: {str(chunk)}")
+    except Exception as e:
+        print(f"\nAn error occurred: {str(e)}")
+        raise
+
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_community.document_loaders import TextLoader, PyPDFLoader
+from langchain_qdrant import QdrantVectorStore
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema import StrOutputParser
+from langchain.schema.runnable import RunnablePassthrough
+import re
+import os
+
+def create_retriever_from_file(file_path: str, collection_name: str = "buildorbuy_docs"):
+    """
+    Creates a retriever from a file by:
+    1. Loading the document
+    2. Splitting it into chunks
+    3. Creating embeddings
+    4. Storing in Qdrant (in-memory)
+    5. Creating and returning a retriever
+
+    Args:
+        file_path (str): Path to the file
+        collection_name (str): Name for the Qdrant collection
+
+    Returns:
+        retriever: A langchain retriever object
+    """
+    # Determine file type and load document
+    file_extension = os.path.splitext(file_path)[1].lower()
+    if file_extension == '.pdf':
+        loader = PyPDFLoader(file_path)
+    elif file_extension in ['.txt', '.md', '.py']:
+        loader = TextLoader(file_path)
+    else:
+        raise ValueError(f"Unsupported file type: {file_extension}")
+    
+    documents = loader.load()
+    
+    # Split documents into smaller chunks with more overlap
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,          # Smaller chunks (500 characters)
+        chunk_overlap=50,        # 50 character overlap
+        length_function=len,
+        separators=["\n\n", "\n", " ", ""],  # Custom separators
+        is_separator_regex=False
+    )
+    splits = text_splitter.split_documents(documents)
+    
+    #print(f"Split {len(documents)} documents into {len(splits)} chunks")
+    
+    """"
+    # Print first few chunks to verify splitting
+    for i, split in enumerate(splits[:3]):
+        print(f"\nChunk {i+1}:")
+        print("Content:", split.page_content[:200], "...")  # First 200 chars
+        print("Metadata:", split.metadata)
+    """""
+    # Initialize embeddings
+    embeddings = OpenAIEmbeddings()
+    
+    # Create in-memory Qdrant instance
+    client = QdrantClient(":memory:")
+    
+    # Create collection with the same dimensionality as OpenAI embeddings (1536 for text-embedding-ada-002)
+    client.create_collection(
+        collection_name=collection_name,
+        vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
+    )
+    
+    # Create Qdrant vector store
+    vector_store = QdrantVectorStore(
+        client=client,
+        collection_name=collection_name,
+        embedding=embeddings,
+    )
+    
+    # Add documents to the vector store
+    vector_store.add_documents(splits)
+    
+    # Create and return retriever
+    retriever = vector_store.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": 5}
+    )
+    
+    return retriever
+
+import os
+os.environ['TK_SILENCE_DEPRECATION'] = '1'  # Suppress IMK message
+
+# Rest of your imports
+from pathlib import Path
+import re
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
+import uuid
+import asyncio
+from IPython.display import Markdown, display
+
+def select_file():
+    """
+    Opens a file dialog to select a file and returns the file path.
+    Falls back to command line input if tkinter is not available.
+    Supports .pdf, .txt, and .md files.
+    """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        
+        root = tk.Tk()
+        root.withdraw()
+
+        file_path = filedialog.askopenfilename(
+            title="Select a file",
+            filetypes=[
+                ("PDF files", "*.pdf"),
+                ("Text files", "*.txt"),
+                ("Markdown files", "*.md"),
+                ("All files", "*.*")
+            ]
+        )
+        
+    except ImportError:
+        print("\nTkinter is not available. Please enter the file path manually.")
+        print("Example: /path/to/your/file.txt")
+        file_path = input("\nEnter file path: ").strip()
+    
+    if not file_path:
+        raise ValueError("No file selected")
+    
+    if not os.path.exists(file_path):
+        raise ValueError(f"File not found: {file_path}")
+        
+    return file_path
+
+def extract_capability(retriever):
+    """
+    Creates and runs a RAG chain to extract a capability from user stories.
+    
+    Args:
+        retriever: A document retriever initialized with the source content
+        
+    Returns:
+        dict: A dictionary containing the system description and the extracted capability name
+    """
+    template = """Based on the extracted user stories, please name one capability.
+
+    Here's the format I want you to follow:
+
+    Context: "As a user, I want to be able to view my monthly bill, so that I can understand my charges."
+    System Description: "This is a billing system that allows users to view their monthly bill."
+    Capability: "Billing"
+
+    Rules for the capability name:
+    - Keep it to 1-2 words maximum
+    - Use simple, clear terms
+    - Remove words like "Management", "System", "Module"
+    - Make it concise and focused
+
+    Now, based on these user stories, please describe the system and identify one key capability:
+    {context}
+
+    Question: {question}
+
+    Output your response in exactly this format:
+    System Description: "<system_description>"
+    Capability: "<capability_name>"
+    """
+    prompt = ChatPromptTemplate.from_template(template)
+    model = ChatOpenAI()
+
+    rag_chain = (
+        {"context": retriever, "question": RunnablePassthrough()}
+        | prompt
+        | model
+        | StrOutputParser()
+    )
+
+    # Use the chain
+    response = rag_chain.invoke("What is the one capability that is most relevant to the user stories?")
+    
+    # Extract both system description and capability
+    system_match = re.search(r'System Description:\s*"([^"]+)"', response)
+    capability_match = re.search(r'Capability:\s*"([^"]+)"', response)
+    
+    if not system_match or not capability_match:
+        raise ValueError("Could not extract system description or capability from response")
+    
+    return {
+        "system_description": system_match.group(1),
+        "capability": capability_match.group(1)
+    }
+
+if __name__ == "__main__":
+    try:
+        # Let user select the file
+        file_path = select_file()
+        print(f"Selected file: {file_path}")
+        
+        # Create retriever from selected file
+        retriever = create_retriever_from_file(file_path)
+        
+        # Extract the capability
+        capability_info = extract_capability(retriever)
+        print(f"\nExtracted Capability: {capability_info['capability']}")
+        print(f"\nSystem Description: {capability_info['system_description']}")
+        
+         # Run the research process
+        print(f"\nStarting research for capability: {capability_info['capability']}")
+        asyncio.run(run_research(capability_info['capability']))
+        
+            
+    except Exception as e:
+        print(f"\nAn error occurred: {str(e)}")
