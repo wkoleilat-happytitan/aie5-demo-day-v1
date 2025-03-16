@@ -1,66 +1,46 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# ## LangGraph Open Deep Research Unrolled
-# 
-# In this notebook, we'll look at the unrolled version of the Open Deep Research graph.
-# 
-# You can visit this repository to see the original application: [Open Deep Research](https://github.com/langchain-ai/open_deep_research)
-# 
-# Let's jump in!
-
-# ## What We're Building
-# 
-# ![image](https://i.imgur.com/YzbY9vJ.png)
-
-# Dependencies: 
-# 
-# You'll need two different API keys for the default method - though you can customize this graph to your heart's content!
-
-# In[1]:
-
-
-
+# Standard library imports
 import os
-import getpass
-from dotenv import load_dotenv
+import uuid
+import asyncio
+import requests
+from enum import Enum
+from dataclasses import dataclass, fields
+from typing import Optional, Dict, Any, Literal
+from dotenv import load_dotenv 
+from IPython.display import Markdown, display
+
+# LangChain imports
+from langchain.chat_models import ChatOpenAI, init_chat_model
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
+from langchain_community.retrievers import ArxivRetriever
+from langchain_community.utilities.pubmed import PubMedAPIWrapper
+from langsmith import traceable
+
+
+# LangGraph imports
+from langgraph.graph import START, END, StateGraph
+from langgraph.types import interrupt, Command
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.constants import Send
+
+# Websearch imports
+from tavily import TavilyClient, AsyncTavilyClient
+from exa_py import Exa
+
+# Local imports
+from capability_extractor import extract_capability, select_file, create_retriever_from_file
+
+
 
 load_dotenv()
 
-# os.environ["ANTHROPIC_API_KEY"] = getpass.getpass("Enter your Anthropic API key: ")
-# os.environ["TAVILY_API_KEY"] = getpass.getpass("Enter your Tavily API key: ")
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 LINKUP_API_KEY = os.getenv("LINKUP_API_KEY")
-
-
-# ## Task 1: State
-# 
-# The state structure organizes all the information needed to generate and refine a report on a given topic through multiple steps. Here's a breakdown:
-# 
-# - **Report-Level State:**  
-#   - **Topic:** The overall subject of the report.  
-#   - **Feedback on Report Plan:** Comments or evaluations on the preliminary report outline.  
-#   - **Sections:** A list of individual report sections (each with its own name, description, whether research is needed, and content).  
-#   - **Completed Sections:** A collection of sections that have been fully developed, which is also used by downstream processes (e.g., a Send() API).  
-#   - **Research-Based Content:** A string that gathers content produced from web research, which may be integrated into the final report.  
-#   - **Final Report:** The completed report after all sections and revisions are combined.
-# 
-# - **Section-Level State:**  
-#   For each report section, the state captures:  
-#   - **Section Details:** Including the section's name, a brief overview (description), a flag indicating if web research should be performed, and the actual content.  
-#   - **Search Process:** The number of search iterations that have been executed and a list of search queries used to gather information.  
-#   - **Source Content:** A formatted string containing the relevant material obtained from web searches.  
-#   - **Integration:** Both the research-derived content and the list of fully completed sections are tracked to ensure they can be merged into the overall report.
-# 
-# - **Search Queries and Feedback:**  
-#   - **Search Queries:** Represented as individual query objects, these encapsulate the strings used to perform web searches.  
-#   - **Feedback:** After generating parts of the report, feedback is provided as a grade (either "pass" or "fail") along with any follow-up queries to improve the work.
-
-# In[2]:
 
 
 from typing import Annotated, List, TypedDict, Literal
@@ -129,31 +109,8 @@ class SectionOutputState(TypedDict):
     completed_sections: list[Section] # Final key we duplicate in outer state for Send() API
 
 
-# ## Task 2: Utilities and Helpers
-# 
-# We have a number of utility functions that we'll use to build our graph. Let's take a look at them.
-
-# In[3]:
-
-
-import os
-import asyncio
-import requests
-
-from tavily import TavilyClient, AsyncTavilyClient
-from langchain_community.retrievers import ArxivRetriever
-from langchain_community.utilities.pubmed import PubMedAPIWrapper
-from exa_py import Exa
-from typing import List, Optional, Dict, Any
-from langsmith import traceable
-
 tavily_client = TavilyClient()
 tavily_async_client = AsyncTavilyClient()
-
-
-# This function is a small helper that makes sure your configuration values are in a consistent format. If you pass in a string, it simply returns that string. However, if you pass in an enum (a special type of value), it will extract and return the underlying value of that enum. This helps when your configuration might come in different types but you need to work with strings consistently.
-
-# In[4]:
 
 
 def get_config_value(value):
@@ -161,11 +118,6 @@ def get_config_value(value):
     Helper function to handle both string and enum cases of configuration values
     """
     return value if isinstance(value, str) else value.value
-
-
-# This function filters a configuration dictionary so that it only includes parameters that are allowed for a specific search API. It works by looking up a list of accepted parameter names for the given API (like "exa" or "pubmed") and then stripping out any other entries from the configuration. If no configuration is provided, it simply returns an empty dictionary. This ensures that only valid and expected parameters are sent to the API.
-
-# In[5]:
 
 
 # Helper function to get search parameters based on the search API and config
@@ -198,11 +150,6 @@ def get_search_params(search_api: str, search_api_config: Optional[Dict[str, Any
 
     # Filter the config to only include accepted parameters
     return {k: v for k, v in search_api_config.items() if k in accepted_params}
-
-
-# This function takes a collection of search results—possibly from several responses—and formats them into a neat, human-readable string. It starts by combining all the results and then removes any duplicates (using the URL to check for repeats). For each unique source, it prints out the title, URL, and a summary of the content. If enabled, it also includes a trimmed version of the full source content, ensuring that the text does not exceed a specified token limit. This results in a clean, consolidated overview of your search results.
-
-# In[6]:
 
 
 def deduplicate_and_format_sources(search_response, max_tokens_per_source, include_raw_content=False):
@@ -254,11 +201,6 @@ def deduplicate_and_format_sources(search_response, max_tokens_per_source, inclu
     return formatted_text.strip()
 
 
-# Designed to help organize documentation or reports, this function takes a list of section objects and turns them into a well-formatted string. For each section, it prints a header with the section number and name, followed by its description, any research notes, and the main content (or a placeholder if the content isn't written yet). The output is clearly separated by visual dividers, making it easy to read and understand the structure of the document.
-
-# In[7]:
-
-
 def format_sections(sections: list[Section]) -> str:
     """ Format a list of sections into a string """
     formatted_str = ""
@@ -277,11 +219,6 @@ Content:
 
 """
     return formatted_str
-
-
-# This function performs multiple web searches concurrently using the Tavily API. You simply provide it with a list of search queries, and it creates asynchronous tasks for each one. The function then gathers all the responses together, each containing details like the title, URL, snippet of content, and optionally the raw content. This is particularly useful when you need to search several queries at once without waiting for each one to finish sequentially.
-
-# In[8]:
 
 
 @traceable
@@ -327,11 +264,6 @@ async def tavily_search_async(search_queries):
     search_docs = await asyncio.gather(*search_tasks)
 
     return search_docs
-
-
-# This function leverages the Perplexity API to perform web searches. For every query provided, it sends a request with a prompt to fetch factual content. The response is parsed to extract the main answer and any associated citations. The first citation contains the full content, while any additional citations serve as secondary sources. The results are then packaged into a standardized structure, making it clear which source provides the complete information and which ones are supporting references.
-
-# In[9]:
 
 
 @traceable
@@ -428,11 +360,6 @@ def perplexity_search(search_queries):
         })
 
     return search_docs
-
-
-# Using the Exa API, this function performs web searches with a lot of flexibility. It allows you to limit the number of characters retrieved for each result, specify how many results you want, and even control which domains to include or exclude. If you need more detail, it can also fetch additional subpages related to each result. The function processes each query (while handling rate limits), deduplicates the results by their URL, and combines elements like summaries and text into a single, formatted output.
-
-# In[10]:
 
 
 @traceable
@@ -639,11 +566,6 @@ async def exa_search(search_queries, max_characters: Optional[int] = None, num_r
     return search_docs
 
 
-# This function is tailored for searching academic papers on arXiv. It runs asynchronously, so it can handle multiple queries without blocking. For each search query, it initializes an arXiv retriever that gathers documents along with their metadata (like authors, publication dates, and summaries). The results are then formatted to include useful details such as a link to the paper and even a link to the PDF if available. It also assigns a relevance score to each paper and respects arXiv's rate limits by adding delays between requests.
-
-# In[11]:
-
-
 @traceable
 async def arxiv_search_async(search_queries, load_max_docs=5, get_full_documents=True, load_all_available_meta=True):
     """
@@ -802,11 +724,6 @@ async def arxiv_search_async(search_queries, load_max_docs=5, get_full_documents
     return search_docs
 
 
-# Focused on retrieving biomedical literature, this function performs asynchronous searches on PubMed using a specialized API wrapper. For each query, it fetches a set of documents and processes them to extract important details such as the publication date, copyright information, and a summary of the research. It then constructs a URL for the PubMed entry and organizes everything neatly into a structured response. The function also dynamically adjusts delays between requests to avoid hitting rate limits, ensuring smooth and efficient retrieval of biomedical articles.
-
-# In[12]:
-
-
 @traceable
 async def pubmed_search_async(search_queries, top_k_results=5, email=None, api_key=None, doc_content_chars_max=4000):
     """
@@ -956,40 +873,6 @@ async def pubmed_search_async(search_queries, top_k_results=5, email=None, api_k
     return search_docs
 
 
-# ## Report Planner and Configurations
-# 
-# This code defines a configuration system for a chatbot that generates reports. Here's a breakdown of its components:
-# 
-# 1. **Default Report Structure:**  
-#    A multi-line string provides a template for creating reports. It suggests starting with an introduction that gives an overview of the topic, then dividing the main content into sections focused on sub-topics, and finally ending with a conclusion that summarizes the main points.
-# 
-# 2. **Enumerated Types (Enums):**  
-#    - **SearchAPI:** Lists possible search services (like PERPLEXITY, TAVILY, EXA, ARXIV, and PUBMED) that the chatbot might use to gather information.
-#    - **PlannerProvider & WriterProvider:** These define options for external service providers that handle planning (organizing the report structure) and writing (generating the text). Options include providers like ANTHROPIC, OPENAI, and GROQ.
-# 
-# 3. **Configuration Data Class:**  
-#    The `Configuration` class holds various settings for the chatbot. Key attributes include:
-#    - **report_structure:** Uses the default report template.
-#    - **number_of_queries:** Specifies how many search queries should be generated in each iteration (default is 2).
-#    - **max_search_depth:** Sets the limit for how many times the chatbot can iterate through reflection and search (default is 2).
-#    - **planner_provider & planner_model:** Determine which external service and model to use for planning the report.
-#    - **writer_provider & writer_model:** Specify the external service and model for generating the report text.
-#    - **search_api & search_api_config:** Indicate which search API to use (defaulting to TAVILY) and allow for additional API configuration.
-# 
-# 4. **Configuration Initialization Method:**  
-#    The class method `from_runnable_config` allows the configuration to be created from a provided configuration object (or from environment variables). It checks for values in the environment (using uppercase names) and from a passed configuration dictionary. Only fields with provided values are used to instantiate the `Configuration` object.
-
-# In[13]:
-
-
-import os
-from enum import Enum
-from dataclasses import dataclass, fields
-from typing import Any, Optional, Dict 
-
-from langchain_core.runnables import RunnableConfig
-from dataclasses import dataclass
-
 DEFAULT_REPORT_STRUCTURE = """Use this structure to create an analysis report for build or buy decision of a capability:
 
 1. Introduction (no research needed)
@@ -1027,15 +910,15 @@ class WriterProvider(Enum):
 @dataclass(kw_only=True)
 class Configuration:
     """The configurable fields for the chatbot."""
-    report_structure: str = DEFAULT_REPORT_STRUCTURE # Defaults to the default report structure
-    number_of_queries: int = 2 # Number of search queries to generate per iteration
-    max_search_depth: int = 2 # Maximum number of reflection + search iterations
-    planner_provider: PlannerProvider = PlannerProvider.ANTHROPIC  # Defaults to Anthropic as provider
-    planner_model: str = "claude-3-7-sonnet-latest" # Defaults to claude-3-7-sonnet-latest, add "-thinking" to enable thinking mode
-    writer_provider: WriterProvider = WriterProvider.ANTHROPIC # Defaults to Anthropic as provider
-    writer_model: str = "claude-3-5-sonnet-latest" # Defaults to claude-3-5-sonnet-latest
-    search_api: SearchAPI = SearchAPI.TAVILY # Default to TAVILY
-    search_api_config: Optional[Dict[str, Any]] = None 
+    report_structure: str = DEFAULT_REPORT_STRUCTURE 
+    number_of_queries: int = 2 
+    max_search_depth: int = 2 
+    planner_provider: PlannerProvider = PlannerProvider.OPENAI
+    planner_model: str = "gpt-4o"  # Changed from Claude to GPT-4
+    writer_provider: WriterProvider = WriterProvider.OPENAI
+    writer_model: str = "gpt-4o"
+    search_api: SearchAPI = SearchAPI.TAVILY
+    search_api_config: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_runnable_config(
@@ -1051,28 +934,6 @@ class Configuration:
             if f.init
         }
         return cls(**{k: v for k, v in values.items() if v})
-
-
-# ## Prompt Templates
-# 
-# These templates are used to guide the chatbot's behavior in different stages of report generation: 
-# 
-# 1. **Report Planner Query Writer:**  
-#    This prompt generates search queries to help with planning the report structure. It asks the model to create queries that will gather information for each section of the report.
-# 
-# 2. **Report Plan:**  
-#    This prompt generates a plan for the report. It asks the model to create a list of sections for the report.
-# 
-# 3. **Section Writer:**  
-#    This prompt generates a section of the report. It asks the model to write a section of the report based on the provided section topic and existing content.
-# 
-# 4. **Section Grader:**  
-#    This prompt grades a section of the report. It asks the model to evaluate whether the section content adequately addresses the section topic.
-# 
-# 5. **Final Section Writer:**  
-#    This prompt generates the final section of the report. It asks the model to write a section of the report that synthesizes information from the rest of the report.
-
-# In[14]:
 
 
 # Prompt to generate search queries to help with planning the report
@@ -1319,34 +1180,6 @@ For Conclusion/Summary:
 </Quality Checks>"""
 
 
-# ## Nodes for Our Graph
-# 
-# ## 1. `generate_report_plan`
-# 
-# **Purpose:**  
-# Creates the initial report plan by breaking down the topic into sections and generating search queries to guide further research.
-# 
-# **Key Steps:**
-# - **Input Extraction:** Retrieves the topic and any feedback provided.
-# - **Configuration Loading:** Loads settings (e.g., report structure, number of queries, search API details).
-# - **Query Generation:** Uses a writer model to generate search queries based on the topic and desired report organization.
-# - **Web Search:** Executes a web search (via APIs like *tavily*, *perplexity*, *exa*, *arxiv*, or *pubmed*) with the generated queries to retrieve relevant sources.
-# - **Section Planning:** Uses a planner model to create detailed sections (each with a name, description, plan, research flag, and content field) based on the gathered sources.
-# - **Output:** Returns a dictionary with a key `"sections"` containing a list of planned sections.
-
-# In[15]:
-
-
-from typing import Literal
-
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain.chat_models import init_chat_model
-from langchain_core.runnables import RunnableConfig
-
-from langgraph.constants import Send
-from langgraph.graph import START, END, StateGraph
-from langgraph.types import interrupt, Command
-
 # Nodes
 async def generate_report_plan(state: ReportState, config: RunnableConfig):
     """ Generate the report plan """
@@ -1443,22 +1276,6 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
     return {"sections": sections}
 
 
-# ## 2. `human_feedback`
-# 
-# **Purpose:**  
-# Obtains user feedback on the generated report plan and decides whether to approve the plan or refine it.
-# 
-# **Key Steps:**
-# - **Plan Formatting:** Converts the planned sections into a readable string format.
-# - **Feedback Collection:** Uses an interrupt (user prompt) to gather approval or suggestions.
-# - **Decision Making:**  
-#   - If approved (feedback is `True`), triggers the building of report sections that require further research.  
-#   - If not, updates the report plan with the provided feedback and regenerates the plan.
-# - **Output:** Returns a command directing the next step—either to build sections or to re-run the planning node
-
-# In[16]:
-
-
 def human_feedback(state: ReportState, config: RunnableConfig) -> Command[Literal["generate_report_plan","build_section_with_web_research"]]:
     """ Get feedback on the report plan """
 
@@ -1497,19 +1314,6 @@ def human_feedback(state: ReportState, config: RunnableConfig) -> Command[Litera
         raise TypeError(f"Interrupt value of type {type(feedback)} is not supported.")
 
 
-# ## 3. `generate_queries`
-# 
-# **Purpose:**  
-# Generates targeted search queries for a specific report section to drive focused web research.
-# 
-# **Key Steps:**
-# - **Input Extraction:** Uses the topic and section description.
-# - **Query Generation:** Utilizes a writer model to generate a set number of search queries tailored to the section.
-# - **Output:** Returns a dictionary with `"search_queries"` containing the list of generated queries.
-
-# In[17]:
-
-
 def generate_queries(state: SectionState, config: RunnableConfig):
     """ Generate search queries for a report section """
 
@@ -1537,23 +1341,6 @@ def generate_queries(state: SectionState, config: RunnableConfig):
                                      HumanMessage(content="Generate search queries on the provided topic.")])
 
     return {"search_queries": queries.queries}
-
-
-# ## 4. `search_web`
-# 
-# **Purpose:**  
-# Performs web searches using the generated queries to gather raw sources and relevant information for a report section.
-# 
-# **Key Steps:**
-# - **Query List Preparation:** Converts the generated queries into a list.
-# - **API Selection & Execution:** Calls the configured search API (e.g., *tavily*, *perplexity*, *exa*, etc.) with the appropriate parameters.
-# - **Result Processing:** Deduplicates and formats the search results into a single string.
-# - **Iteration Update:** Increments the search iteration count for tracking.
-# - **Output:** Returns a dictionary with:
-#   - `"source_str"`: The formatted search result string.
-#   - `"search_iterations"`: The updated count.
-
-# In[18]:
 
 
 async def search_web(state: SectionState, config: RunnableConfig):
@@ -1590,25 +1377,6 @@ async def search_web(state: SectionState, config: RunnableConfig):
         raise ValueError(f"Unsupported search API: {search_api}")
 
     return {"source_str": source_str, "search_iterations": state["search_iterations"] + 1}
-
-
-# ## 5. `write_section`
-# 
-# **Purpose:**  
-# Writes the content of a report section by synthesizing the gathered web research.
-# 
-# **Key Steps:**
-# - **Content Generation:** Uses a writer model to create section content based on the topic, section details, and the context provided by the search results.
-# - **Content Validation:**  
-#   - Employs a planner model to grade the generated section.  
-#   - Determines if additional research is needed (by checking the grade or if the maximum search iterations are reached).
-# - **Control Flow:**  
-#   - If the section passes or maximum iterations are reached, it publishes the section to completed sections.  
-#   - Otherwise, it updates the section with follow-up queries and loops back to `search_web`.
-# - **Output:** Returns a command that either ends the search for this section or directs the next web search iteration.
-# 
-
-# In[19]:
 
 
 def write_section(state: SectionState, config: RunnableConfig) -> Command[Literal[END, "search_web"]]:
@@ -1653,27 +1421,17 @@ def write_section(state: SectionState, config: RunnableConfig) -> Command[Litera
     planner_provider = get_config_value(configurable.planner_provider)
     planner_model = get_config_value(configurable.planner_model)
 
-    # If the planner model is claude-3-7-sonnet-latest, we need to use bind_tools to use thinking when generating the feedback 
-    if planner_model == "claude-3-7-sonnet-latest":
-        # Allocate a thinking budget for claude-3-7-sonnet-latest as the planner model
-        reflection_model = init_chat_model(model=planner_model, 
-                                           model_provider=planner_provider, 
-                                           max_tokens=20_000, 
-                                           thinking={"type": "enabled", "budget_tokens": 16_000})
+    # Remove Claude-specific thinking mode
+    reflection_model = init_chat_model(
+        model=planner_model, 
+        model_provider=planner_provider,
+        temperature=0
+    ).with_structured_output(Feedback)
 
-        # with_structured_output uses forced tool calling, which thinking mode with Claude 3.7 does not support
-        # So, we use bind_tools without enforcing tool calling to generate the report sections
-        reflection_result = reflection_model.bind_tools([Feedback]).invoke([SystemMessage(content=section_grader_instructions_formatted),
-                                                                            HumanMessage(content=section_grader_message)])
-        tool_call = reflection_result.tool_calls[0]['args']
-        feedback = Feedback.model_validate(tool_call)
-
-    else:
-        reflection_model = init_chat_model(model=planner_model, 
-                                           model_provider=planner_provider).with_structured_output(Feedback)
-
-        feedback = reflection_model.invoke([SystemMessage(content=section_grader_instructions_formatted),
-                                            HumanMessage(content=section_grader_message)])
+    feedback = reflection_model.invoke([
+        SystemMessage(content=section_grader_instructions_formatted),
+        HumanMessage(content=section_grader_message)
+    ])
 
     # If the section is passing or the max search depth is reached, publish the section to completed sections 
     if feedback.grade == "pass" or state["search_iterations"] >= configurable.max_search_depth:
@@ -1688,19 +1446,6 @@ def write_section(state: SectionState, config: RunnableConfig) -> Command[Litera
         update={"search_queries": feedback.follow_up_queries, "section": section},
         goto="search_web"
         )
-
-
-# ## 6. `write_final_sections`
-# 
-# **Purpose:**  
-# Generates the final version of sections that do not require further research by using the compiled context from completed sections.
-# 
-# **Key Steps:**
-# - **Context Preparation:** Receives the topic, section details, and the aggregated completed sections.
-# - **Final Writing:** Uses a writer model to produce the final version of the section content.
-# - **Output:** Returns a dictionary with `"completed_sections"` updated with the final section content.
-
-# In[20]:
 
 
 def write_final_sections(state: SectionState, config: RunnableConfig):
@@ -1731,19 +1476,6 @@ def write_final_sections(state: SectionState, config: RunnableConfig):
     return {"completed_sections": [section]}
 
 
-# ## 7. `gather_completed_sections`
-# 
-# **Purpose:**  
-# Consolidates all completed sections into a formatted context string to support final section writing.
-# 
-# **Key Steps:**
-# - **Aggregation:** Collates completed sections from earlier research.
-# - **Formatting:** Converts each section into a string format to be used as context.
-# - **Output:** Returns a dictionary with `"report_sections_from_research"` containing the aggregated context.
-
-# In[21]:
-
-
 def gather_completed_sections(state: ReportState):
     """ Gather completed sections from research and format them as context for writing the final sections """    
 
@@ -1756,19 +1488,6 @@ def gather_completed_sections(state: ReportState):
     return {"report_sections_from_research": completed_report_sections}
 
 
-# ## 8. `initiate_final_section_writing`
-# 
-# **Purpose:**  
-# Triggers the final writing phase for report sections that do not need further web research.
-# 
-# **Key Steps:**
-# - **Selection:** Identifies sections marked as not requiring additional research.
-# - **Parallel Processing:** Uses a parallelized `Send()` API to launch final section writing tasks concurrently.
-# - **Output:** Returns a list of `Send` commands for writing final sections.
-
-# In[22]:
-
-
 def initiate_final_section_writing(state: ReportState):
     """ Write any final sections using the Send API to parallelize the process """    
 
@@ -1778,19 +1497,6 @@ def initiate_final_section_writing(state: ReportState):
         for s in state["sections"] 
         if not s.research
     ]
-
-
-# ## 9. `compile_final_report`
-# 
-# **Purpose:**  
-# Compiles all finalized sections into one cohesive final report.
-# 
-# **Key Steps:**
-# - **Content Mapping:** Matches the finalized content with the original sections while preserving the intended order.
-# - **Report Assembly:** Joins all section contents together into a single text string.
-# - **Output:** Returns a dictionary with the key `"final_report"` containing the complete report.
-
-# In[23]:
 
 
 def compile_final_report(state: ReportState):
@@ -1808,11 +1514,6 @@ def compile_final_report(state: ReportState):
     all_sections = "\n\n".join([s.content for s in sections])
 
     return {"final_report": all_sections}
-
-
-# ## BUILD THAT GRAPH!!!!
-
-# In[24]:
 
 
 section_builder = StateGraph(SectionState, output=SectionOutputState)
@@ -1845,56 +1546,88 @@ builder.add_edge("write_final_sections", "compile_final_report")
 builder.add_edge("compile_final_report", END)
 
 
-# ## Using the Graph: WITH CHECKPOINTS!
-
-# In[25]:
-
-
-from langgraph.checkpoint.memory import MemorySaver
-from IPython.display import Markdown, display
-
 # Create a memory saver for checkpointing
 memory = MemorySaver()
 
 # Compile the graph with the checkpointer
 graph_with_checkpoint = builder.compile(checkpointer=memory)
 
-
-# In[26]:
-
-
-# Create a unique thread ID
-import uuid
 thread_id = str(uuid.uuid4())
 
 # Start the graph execution with the topic and display the final report when it appears
-async def run_graph_and_show_report():
+async def run_graph_and_show_report(capability: str, auto_approve_plan: bool = True):
     """Run the graph and display the final report when it appears"""
-    async for chunk in graph_with_checkpoint.astream(
-        {"system": "DeepSeek-R1"}, 
-        {"configurable": {"thread_id": thread_id}},
-        stream_mode="updates"
-    ):
-        print(chunk)
-        print("\n")
-
-        # Check if this chunk contains the final_report
-        if isinstance(chunk, dict) and 'final_report' in chunk:
-            print("🎉 Final report generated! 🎉")
-            display(Markdown(f"# DeepSeek-R1 Report\n\n{chunk['final_report']}"))
-            return
-
-        # Check if this is an interrupt that needs user feedback
-        if isinstance(chunk, dict) and '__interrupt__' in chunk:
-            interrupt_value = chunk['__interrupt__'][0].value
-            display(Markdown(f"**Feedback Request:**\n{interrupt_value}"))
-            return  # Stop execution to allow user to provide feedback
-
-# Run the graph
-#await run_graph_and_show_report()
-
-
-# In[27]:
+    main_stream = None
+    nested_stream = None
+    try:
+        # Store the generator in a variable so we can properly close it
+        main_stream = graph_with_checkpoint.astream(
+            {"capability": capability}, 
+            {"configurable": {
+                "thread_id": thread_id,
+                "planner_provider": "openai",  # Use OpenAI instead of Anthropic
+                "writer_provider": "openai",   # Use OpenAI instead of Anthropic
+                "search_api": "tavily",
+                "planner_model": "gpt-4o",  # Use latest GPT-4 model
+                "writer_model": "gpt-4o",   # Use latest GPT-4 model
+                "method": "function_calling",
+                "use_anthropic": False,  # Explicitly disable Anthropic
+                "model_provider": "openai",  # Add this
+                "research_model": "gpt-4o",  # Add this
+                "disable_anthropic": True  # Add this
+            }},
+            stream_mode="updates"
+        )
+        
+        final_report = None
+        async for chunk in main_stream:
+            print(f"Received chunk: {chunk}")  # Debug logging
+            
+            if isinstance(chunk, dict):
+                if 'final_report' in chunk:
+                    final_report = chunk
+                    break
+                elif 'compile_final_report' in chunk and 'final_report' in chunk['compile_final_report']:
+                    final_report = {'final_report': chunk['compile_final_report']['final_report']}
+                    break
+                elif '__interrupt__' in chunk and auto_approve_plan:
+                    try:
+                        # Store the nested generator
+                        nested_stream = graph_with_checkpoint.astream(
+                            Command(resume=True),
+                            {"configurable": {"thread_id": thread_id}},
+                            stream_mode="updates"
+                        )
+                        
+                        async for response in nested_stream:
+                            print(f"Received response: {response}")  # Debug logging
+                            
+                            if isinstance(response, dict):
+                                if 'final_report' in response:
+                                    final_report = response
+                                    break
+                                elif 'compile_final_report' in response and 'final_report' in response['compile_final_report']:
+                                    final_report = {'final_report': response['compile_final_report']['final_report']}
+                                    break
+                    except Exception as e:
+                        print(f"Error in nested stream: {str(e)}")
+                        raise
+                    finally:
+                        # Close the nested stream if it exists
+                        if nested_stream:
+                            await nested_stream.aclose()
+                            
+        if final_report:
+            return final_report
+        raise Exception("No final report was generated")
+                            
+    except Exception as e:
+        print(f"Error in main stream: {str(e)}")
+        raise
+    finally:
+        # Close the main stream if it exists
+        if main_stream:
+            await main_stream.aclose()
 
 
 async def approve_plan():
@@ -1934,9 +1667,6 @@ async def approve_plan():
             raise e 
 
 
-# In[28]:
-
-
 async def provide_feedback(feedback_text):
     """Provide feedback and continue execution"""
     async for chunk in graph_with_checkpoint.astream(
@@ -1953,16 +1683,6 @@ async def provide_feedback(feedback_text):
             display(Markdown(f"# DeepSeek-R1 Report\n\n{chunk['final_report']}"))
             return
 
-
-# > NOTE: You *can* choose to continue the flow - though the notebook implementation will require you to stretch your coding muscles a bit!
-
-# In[30]:
-
-
-#await approve_plan()
-
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
 
 async def run_research(capability_input: str):
     """Run the research process directly"""
@@ -2040,200 +1760,6 @@ async def run_research(capability_input: str):
     except Exception as e:
         print(f"\nAn error occurred: {str(e)}")
         raise
-
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_community.document_loaders import TextLoader, PyPDFLoader
-from langchain_qdrant import QdrantVectorStore
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema import StrOutputParser
-from langchain.schema.runnable import RunnablePassthrough
-import re
-import os
-
-def create_retriever_from_file(file_path: str, collection_name: str = "buildorbuy_docs"):
-    """
-    Creates a retriever from a file by:
-    1. Loading the document
-    2. Splitting it into chunks
-    3. Creating embeddings
-    4. Storing in Qdrant (in-memory)
-    5. Creating and returning a retriever
-
-    Args:
-        file_path (str): Path to the file
-        collection_name (str): Name for the Qdrant collection
-
-    Returns:
-        retriever: A langchain retriever object
-    """
-    # Determine file type and load document
-    file_extension = os.path.splitext(file_path)[1].lower()
-    if file_extension == '.pdf':
-        loader = PyPDFLoader(file_path)
-    elif file_extension in ['.txt', '.md', '.py']:
-        loader = TextLoader(file_path)
-    else:
-        raise ValueError(f"Unsupported file type: {file_extension}")
-    
-    documents = loader.load()
-    
-    # Split documents into smaller chunks with more overlap
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,          # Smaller chunks (500 characters)
-        chunk_overlap=50,        # 50 character overlap
-        length_function=len,
-        separators=["\n\n", "\n", " ", ""],  # Custom separators
-        is_separator_regex=False
-    )
-    splits = text_splitter.split_documents(documents)
-    
-    #print(f"Split {len(documents)} documents into {len(splits)} chunks")
-    
-    """"
-    # Print first few chunks to verify splitting
-    for i, split in enumerate(splits[:3]):
-        print(f"\nChunk {i+1}:")
-        print("Content:", split.page_content[:200], "...")  # First 200 chars
-        print("Metadata:", split.metadata)
-    """""
-    # Initialize embeddings
-    embeddings = OpenAIEmbeddings()
-    
-    # Create in-memory Qdrant instance
-    client = QdrantClient(":memory:")
-    
-    # Create collection with the same dimensionality as OpenAI embeddings (1536 for text-embedding-ada-002)
-    client.create_collection(
-        collection_name=collection_name,
-        vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
-    )
-    
-    # Create Qdrant vector store
-    vector_store = QdrantVectorStore(
-        client=client,
-        collection_name=collection_name,
-        embedding=embeddings,
-    )
-    
-    # Add documents to the vector store
-    vector_store.add_documents(splits)
-    
-    # Create and return retriever
-    retriever = vector_store.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": 5}
-    )
-    
-    return retriever
-
-import os
-os.environ['TK_SILENCE_DEPRECATION'] = '1'  # Suppress IMK message
-
-# Rest of your imports
-from pathlib import Path
-import re
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
-import uuid
-import asyncio
-from IPython.display import Markdown, display
-
-def select_file():
-    """
-    Opens a file dialog to select a file and returns the file path.
-    Falls back to command line input if tkinter is not available.
-    Supports .pdf, .txt, and .md files.
-    """
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-        
-        root = tk.Tk()
-        root.withdraw()
-
-        file_path = filedialog.askopenfilename(
-            title="Select a file",
-            filetypes=[
-                ("PDF files", "*.pdf"),
-                ("Text files", "*.txt"),
-                ("Markdown files", "*.md"),
-                ("All files", "*.*")
-            ]
-        )
-        
-    except ImportError:
-        print("\nTkinter is not available. Please enter the file path manually.")
-        print("Example: /path/to/your/file.txt")
-        file_path = input("\nEnter file path: ").strip()
-    
-    if not file_path:
-        raise ValueError("No file selected")
-    
-    if not os.path.exists(file_path):
-        raise ValueError(f"File not found: {file_path}")
-        
-    return file_path
-
-def extract_capability(retriever):
-    """
-    Creates and runs a RAG chain to extract a capability from user stories.
-    
-    Args:
-        retriever: A document retriever initialized with the source content
-        
-    Returns:
-        dict: A dictionary containing the system description and the extracted capability name
-    """
-    template = """Based on the extracted user stories, please name one capability.
-
-    Here's the format I want you to follow:
-
-    Context: "As a user, I want to be able to view my monthly bill, so that I can understand my charges."
-    System Description: "This is a billing system that allows users to view their monthly bill."
-    Capability: "Billing"
-
-    Rules for the capability name:
-    - Keep it to 1-2 words maximum
-    - Use simple, clear terms
-    - Remove words like "Management", "System", "Module"
-    - Make it concise and focused
-
-    Now, based on these user stories, please describe the system and identify one key capability:
-    {context}
-
-    Question: {question}
-
-    Output your response in exactly this format:
-    System Description: "<system_description>"
-    Capability: "<capability_name>"
-    """
-    prompt = ChatPromptTemplate.from_template(template)
-    model = ChatOpenAI()
-
-    rag_chain = (
-        {"context": retriever, "question": RunnablePassthrough()}
-        | prompt
-        | model
-        | StrOutputParser()
-    )
-
-    # Use the chain
-    response = rag_chain.invoke("What is the one capability that is most relevant to the user stories?")
-    
-    # Extract both system description and capability
-    system_match = re.search(r'System Description:\s*"([^"]+)"', response)
-    capability_match = re.search(r'Capability:\s*"([^"]+)"', response)
-    
-    if not system_match or not capability_match:
-        raise ValueError("Could not extract system description or capability from response")
-    
-    return {
-        "system_description": system_match.group(1),
-        "capability": capability_match.group(1)
-    }
 
 if __name__ == "__main__":
     try:
