@@ -2,7 +2,6 @@
 # Whether to enable telemetry (default: true). No personal data is collected.
 enable_telemetry = true
 
-
 # List of environment variables to be provided by each user to use the app.
 user_env = []
 
@@ -17,6 +16,18 @@ cache = false
 
 # Authorized origins
 allow_origins = ["*"]
+
+# Authorize users to upload files with a maximum size of 100MB
+max_file_size = 100
+
+# Custom chainlit server url, if not provided, the default value is "http://localhost:8000"
+# chainlit_server = ""
+
+# Custom chainlit server api path, if not provided, the default value is "/api"
+# chainlit_server_api_path = ""
+
+# Enable users to upload files
+enable_file_upload = true
 
 [features]
 # Process and display HTML in messages. This can be a security risk (see https://stackoverflow.com/questions/19603097/why-is-it-dangerous-to-render-user-generated-html-or-javascript)
@@ -53,7 +64,7 @@ edit_message = true
 
 [UI]
 # Name of the assistant.
-name = "Assistant"
+name = "Build vs Buy Analysis"
 
 # default_theme = "dark"
 
@@ -87,5 +98,27 @@ cot = "full"
 #     icon_url = "https://avatars.githubusercontent.com/u/128686189?s=200&v=4"
 #     url = "https://github.com/Chainlit/chainlit/issues"
 
+# Description of the app and chatbot
+description = "Upload your user stories and tech specs for a build vs buy analysis"
+
+# The default value for the expand messages settings
+default_expand_messages = true
+
+# Hide the chain of thought details from the user
+hide_cot = false
+
+# Link to your github repo. This will add a github button in the UI's header.
+# github = ""
+
+# Override default MUI light theme. (Check theme.ts)
+[UI.theme.light]
+background = "#FAFAFA"
+paper = "#FFFFFF"
+
+# Override default MUI dark theme. (Check theme.ts)
+[UI.theme.dark]
+background = "#1C1C1C"
+paper = "#262626"
+
 [meta]
-generated_by = "2.4.0"
+generated_by = "0.7.700"

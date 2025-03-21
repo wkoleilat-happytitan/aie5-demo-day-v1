@@ -7,13 +7,17 @@ from enum import Enum
 from dataclasses import dataclass, fields
 from typing import Optional, Dict, Any, Literal, TypeVar, Annotated, List, TypedDict
 from dotenv import load_dotenv 
-from IPython.display import Markdown, display
-import re
-import warnings
 
-# Add these at the top of the file, after the imports
-warnings.filterwarnings("ignore", category=UserWarning, message=".*structured output.*")
-warnings.filterwarnings("ignore", category=UserWarning, message=".*will be ignored.*")
+# Remove IPython import and add fallback display function
+def display_markdown(text: str, title: str = ""):
+    """Display markdown text, falling back to plain text if IPython is not available"""
+    try:
+        from IPython.display import Markdown, display
+        display(Markdown(f"# {title}\n\n{text}"))
+    except ImportError:
+        print(f"\n{title}")
+        print("=" * 80)
+        print(text)
 
 # LangChain imports
 from langchain_openai import ChatOpenAI
@@ -87,19 +91,59 @@ class Sections(BaseModel):
 
 class SearchQuery(BaseModel):
     search_query: str = Field(None, description="Query for web search.")
+    
+    model_config = {
+        "extra": "forbid",
+        "arbitrary_types_allowed": False
+    }
 
 class Queries(BaseModel):
     queries: List[SearchQuery] = Field(
         description="List of search queries.",
     )
+    
+    model_config = {
+        "extra": "forbid",
+        "arbitrary_types_allowed": False
+    }
 
 class Feedback(BaseModel):
     grade: Literal["pass","fail"] = Field(
-        description="Evaluation result indicating whether the response meets requirements ('pass') or needs revision ('fail')."
+        description="Evaluation result indicating whether the response meets requirements ('pass') or needs revision ('fail').",
+        pattern="^(pass|fail)$"  # Add pattern constraint
     )
     follow_up_queries: List[SearchQuery] = Field(
         description="List of follow-up search queries.",
+        default_factory=list,
+        min_items=0,  # Add validation
+        max_items=5   # Add validation
     )
+    
+    model_config = {
+        "extra": "forbid",
+        "arbitrary_types_allowed": False,
+        "json_schema_extra": {
+            "examples": [{
+                "grade": "pass",
+                "follow_up_queries": []
+            }]
+        },
+        "strict": True  # Make the model strict
+    }
+
+    @classmethod
+    def pass_feedback(cls) -> "Feedback":
+        """Create a passing feedback with no follow-up queries"""
+        return cls(grade="pass", follow_up_queries=[])
+
+    @classmethod
+    def fail_feedback(cls, queries: List[SearchQuery]) -> "Feedback":
+        """Create a failing feedback with follow-up queries"""
+        return cls(grade="fail", follow_up_queries=queries)
+
+    def __str__(self) -> str:
+        """String representation for logging"""
+        return f"Feedback(grade={self.grade}, queries={len(self.follow_up_queries)})"
 
 class ReportStateInput(TypedDict):
     capability: str # Report topic
@@ -897,7 +941,8 @@ def init_chat_model(model: str, model_provider: str, temperature: float = 0) -> 
     try:
         chat_model = ChatOpenAI(
             model=model,
-            temperature=temperature
+            temperature=temperature,
+            model_kwargs={"response_format": {"type": "text"}}  # Explicitly set response format
         )
         return chat_model
     except Exception as e:
@@ -908,28 +953,18 @@ def init_chat_model(model: str, model_provider: str, temperature: float = 0) -> 
 
 DEFAULT_REPORT_STRUCTURE = """Use this structure to create an analysis report for build or buy decision of a capability:
 
-1. Introduction
+1. Introduction (no research needed)
    - Brief overview of the capability
 
-2. Buy Options Analysis
-   - Analysis of available buy options for the capability
-   - Key vendors and solutions
-   - Costs and implementation considerations
+2. Main Body Sections:
+   - One section that focused on the buy options for the capability
+   - One section that focuss on the build options for the capability
+   - One section that compares the buy and build options
+   
 
-3. Build Options Analysis
-   - Analysis of building the capability in-house
-   - Resource requirements and timeline
-   - Technical considerations
-
-4. Comparison
-   - Direct comparison of build vs buy options
-   - Cost-benefit analysis
-   - Risk assessment
-
-5. Conclusion
-   - Summary of key findings
-   - Recommendation
-   - Next steps
+3. Conclusion
+   - Aim for 1 structural element (either a list of table) that distills the main body sections 
+   - Provide a concise summary of the report
 
 Provide a paragraph with no more than 500 words to describe the key take aways on the analysis of the build or buy decision"""
 
@@ -957,9 +992,9 @@ class Configuration:
     number_of_queries: int = 2 
     max_search_depth: int = 2 
     planner_provider: PlannerProvider = PlannerProvider.OPENAI
-    planner_model: str = "gpt-4-1106-preview"
+    planner_model: str = "gpt-4o-2024-08-06"  # Changed from Claude to GPT-4
     writer_provider: WriterProvider = WriterProvider.OPENAI
-    writer_model: str = "gpt-4-1106-preview"
+    writer_model: str = "gpt-4o-2024-08-06"
     search_api: SearchAPI = SearchAPI.TAVILY
     search_api_config: Optional[Dict[str, Any]] = None
 
@@ -996,10 +1031,7 @@ Your goal is to generate {number_of_queries} web search queries that will help g
 The queries should:
 
 1. Be related to the Capability
-2. Some queries should look for gartner reports or articles on the capability
-3. Some queries should look for case studies or examples of the capability
-4. Some queries should look for customer reviews or testimonials for the capability
-5. Help satisfy the requirements specified in the report organization
+2. Help satisfy the requirements specified in the report organization
 
 Make the queries specific enough to find high-quality, relevant sources while covering the breadth needed for the report structure.
 </Task>
@@ -1026,20 +1058,26 @@ Here is context to use to plan the sections of the report:
 <Task>
 Generate a list of sections for the analysis report of the build or buy decision. Your plan should be tight and focused with NO overlapping sections or unnecessary filler. 
 
-Each section should have:
-- Name - Clear section name with proper numbering (1, 2, 3, etc.)
-- Description - Brief overview of what this section will cover
-- Research - Whether to perform web research for this section (true/false)
-- Content - Leave blank for now
+For example, a good report structure might look like:
+1/ intro
+2/ overview section of buy options A
+4/ overview section of build options B
+4/ comparison between A and B
+5/ conclusion
+
+Each section should have the fields:
+
+- Name - Name for this section of the report.
+- Description - Brief overview of the build or buy options covered in this section.
+- Research - Whether to perform web research for this section of the report.
+- Content - The content of the section, which you will leave blank for now.
 
 Integration guidelines:
-- Follow the exact numbering and structure from the report organization
-- Keep Introduction as section 1
-- Ensure sections are properly numbered and organized
-- No duplicate section numbers
-- No combining of different numbered sections
+- Include examples and implementation details within main build or buy options sections, not as separate sections
+- Ensure each section has a distinct purpose with no content overlap
+- Combine related concepts rather than separating them
 
-Before submitting, review your structure to ensure it matches the report organization exactly.
+Before submitting, review your structure to ensure it has no redundant sections and follows a logical flow.
 </Task>
 
 <Feedback>
@@ -1083,12 +1121,6 @@ Use the following sources to write the section:
 Previous section content (if any):
 {section_content}
 
-Important formatting rules:
-1. Use this exact format for the section header: "{section_name}"
-2. Do not add any separator lines (like ===== or ---)
-3. Do not repeat the capability name in the section header
-4. Do not add additional numbering to the section header
-
 Write a clear, well-structured section that analyzes the topic based on the provided sources.
 Focus on factual information and provide specific details from the sources.
 """
@@ -1121,12 +1153,6 @@ Use the following completed sections as context:
 
 Write a clear, well-structured section that builds on the research and analysis from previous sections.
 Focus on synthesizing insights and providing clear recommendations.
-
-Important formatting rules:
-1. Use this exact format for the section header: "{section_name}"
-2. Do not add any separator lines (like ===== or ---)
-3. Do not repeat the capability name in the section header
-4. Do not add additional numbering to the section header
 """
 
 
@@ -1209,6 +1235,8 @@ async def generate_report_plan(state: ReportState, config: RunnableConfig):
         # So, we use bind_tools without enforcing tool calling to generate the report sections
         report_sections = planner_llm.bind_tools([Sections]).invoke([SystemMessage(content=system_instructions_sections),
                                                                      HumanMessage(content=planner_message)])
+        tool_call = report_sections.tool_calls[0]['args']
+        report_sections = Sections.model_validate(tool_call)
 
     else:
 
@@ -1369,12 +1397,15 @@ def write_section(state: SectionState, config: RunnableConfig) -> Command[Litera
     planner_provider = get_config_value(configurable.planner_provider)
     planner_model = get_config_value(configurable.planner_model)
 
-    # Remove Claude-specific thinking mode
+    # Update reflection model initialization
     reflection_model = init_chat_model(
         model=planner_model, 
         model_provider=planner_provider,
         temperature=0
-    ).with_structured_output(Feedback)
+    ).with_structured_output(
+        Feedback,
+        method="function_calling"  # Explicitly set method to function_calling
+    )
 
     feedback = reflection_model.invoke([
         SystemMessage(content=section_grader_instructions_formatted),
@@ -1448,34 +1479,20 @@ def initiate_final_section_writing(state: ReportState):
 
 
 def compile_final_report(state: ReportState):
-    """Compile the final report"""    
+    """ Compile the final report """    
+
+    # Get sections
     sections = state["sections"]
     completed_sections = {s.name: s.content for s in state["completed_sections"]}
 
     # Update sections with completed content while maintaining original order
-    formatted_sections = []
     for section in sections:
-        if section.name in completed_sections:
-            content = completed_sections[section.name]
-            
-            # Clean up section headers and content
-            content = re.sub(r'={3,}', '', content)  # Remove === separators
-            content = re.sub(r'^\d+\.\s*\w+', '', content, flags=re.MULTILINE)  # Remove numbered titles
-            content = re.sub(r'Section \d+:.*?\n', '', content)  # Remove "Section X:" lines
-            content = re.sub(r'Build vs Buy Analysis Report:.*?\n', '', content)  # Remove report titles
-            
-            # Extract clean section title
-            section_title = section.name.replace('Section ', '').strip()
-            section_title = re.sub(r'^\d+:\s*', '', section_title)  # Remove leading numbers
-            
-            # Add formatted section with clean title
-            formatted_content = f"# {section_title}\n\n{content.strip()}"
-            formatted_sections.append(formatted_content)
+        section.content = completed_sections[section.name]
 
-    # Join sections with double newlines
-    final_report = "\n\n".join(formatted_sections)
-    
-    return {"final_report": final_report}
+    # Compile final report
+    all_sections = "\n\n".join([s.content for s in sections])
+
+    return {"final_report": all_sections}
 
 
 section_builder = StateGraph(SectionState, output=SectionOutputState)
@@ -1531,16 +1548,16 @@ async def run_graph_and_show_report(capability: str, auto_approve_plan: bool = T
                 "planner_provider": "openai",
                 "writer_provider": "openai",
                 "search_api": "tavily",
-                "planner_model": "gpt-4-1106-preview",
-                "writer_model": "gpt-4-1106-preview",
+                "planner_model": "gpt-4o-2024-08-06",  # Updated model name
+                "writer_model": "gpt-4o-2024-08-06",   # Updated model name
                 "method": "function_calling",
                 "use_anthropic": False,
                 "model_provider": "openai",
-                "research_model": "gpt-4-1106-preview",
+                "research_model": "gpt-4o-2024-08-06",  # Updated model name
                 "disable_anthropic": True,
-                "number_of_queries": 2,  # Add missing required config
-                "max_search_depth": 2,   # Add missing required config
-                "report_structure": DEFAULT_REPORT_STRUCTURE  # Add missing required config
+                "number_of_queries": 2,
+                "max_search_depth": 2,
+                "report_structure": DEFAULT_REPORT_STRUCTURE
             }
         }
         
@@ -1595,6 +1612,7 @@ async def run_graph_and_show_report(capability: str, auto_approve_plan: bool = T
                             await nested_stream.aclose()
                             
         if final_report:
+            display_markdown(final_report, "DeepSeek-R1 Report")
             return final_report
         raise Exception("No final report was generated")
                             
@@ -1628,7 +1646,7 @@ async def approve_plan():
                     if 'final_report' in chunk['compile_final_report']:
                         print("🎉 Final report generated! 🎉")
                         final_report = chunk['compile_final_report']['final_report']
-                        display(Markdown(f"# DeepSeek-R1 Report\n\n{final_report}"))
+                        display_markdown(final_report, "DeepSeek-R1 Report")
                         return
             return  # Success - exit the retry loop
 
@@ -1657,7 +1675,7 @@ async def provide_feedback(feedback_text):
         # Check if this chunk contains the final_report
         if isinstance(chunk, dict) and 'final_report' in chunk:
             print("🎉 Final report generated! 🎉")
-            display(Markdown(f"# DeepSeek-R1 Report\n\n{chunk['final_report']}"))
+            display_markdown(chunk['final_report'], "DeepSeek-R1 Report")
             return
 
 
@@ -1669,9 +1687,12 @@ async def run_research(capability_input: str):
             "planner_provider": "openai",
             "writer_provider": "openai",
             "search_api": "tavily",
-            "planner_model": "gpt-4-1106-preview",
-            "writer_model": "gpt-4-1106-preview",
-            "method": "function_calling"
+            "planner_model": "gpt-4o-2024-08-06",  # Updated model name
+            "writer_model": "gpt-4o-2024-08-06",   # Updated model name
+            "method": "function_calling",
+            "number_of_queries": 2,
+            "max_search_depth": 2,
+            "report_structure": DEFAULT_REPORT_STRUCTURE
         }
     }
 
@@ -1687,7 +1708,7 @@ async def run_research(capability_input: str):
             if isinstance(chunk, dict):
                 if 'final_report' in chunk:
                     try:
-                        display(Markdown(f"# {capability_input} Report\n\n{chunk['final_report']}"))
+                        display_markdown(chunk['final_report'], f"# {capability_input} Report")
                     except NameError:  # If not in IPython environment
                         print(f"\n{capability_input} Report")
                         print("=" * 80)
@@ -1706,7 +1727,7 @@ async def run_research(capability_input: str):
                             if isinstance(response, dict):
                                 if 'final_report' in response:
                                     try:
-                                        display(Markdown(f"# {capability_input} Report\n\n{response['final_report']}"))
+                                        display_markdown(response['final_report'], f"# {capability_input} Report")
                                     except NameError:  # If not in IPython environment
                                         print(f"\n{capability_input} Report")
                                         print("=" * 80)
@@ -1724,7 +1745,7 @@ async def run_research(capability_input: str):
                             if isinstance(response, dict):
                                 if 'final_report' in response:
                                     try:
-                                        display(Markdown(f"# {capability_input} Report\n\n{response['final_report']}"))
+                                        display_markdown(response['final_report'], f"# {capability_input} Report")
                                     except NameError:  # If not in IPython environment
                                         print(f"\n{capability_input} Report")
                                         print("=" * 80)

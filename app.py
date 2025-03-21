@@ -5,6 +5,10 @@ from pathlib import Path
 import chainlit as cl
 from capability_extractor import create_retriever_from_file, extract_capability
 from open_deep_research_buildorbuy_py import run_graph_and_show_report
+import re
+from langchain_openai import ChatOpenAI
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema.output_parser import StrOutputParser
 
 # Chat initialization
 @cl.on_chat_start
@@ -104,53 +108,106 @@ async def on_cancel_analysis(action):
 
 # Slide generation utilities
 async def convert_to_slides_and_get_file(report_content: str, capability: str) -> Path:
+    """Convert report to slides and return the PDF file path."""
     slides_dir = Path("slides")
     slides_dir.mkdir(exist_ok=True)
     
     filename = f"build_vs_buy_{capability.lower().replace(' ', '_')}"
     md_file = slides_dir / f"{filename}.md"
     pdf_file = slides_dir / f"{filename}.pdf"
+
+    # Initialize ChatOpenAI
+    summarizer = ChatOpenAI(
+        model="gpt-4-turbo-preview", 
+        temperature=0
+    )
     
-    def extract_section(content: str, section_name: str) -> str:
-        try:
-            if section_name not in content:
-                return "Section not found"
-            sections = content.split(section_name)
-            if len(sections) < 2:
-                return "Section not found"
-            section_content = sections[1].split("\n## ")[0].strip()
-            return section_content
-        except Exception as e:
-            print(f"Error extracting {section_name}: {str(e)}")
-            return f"Error extracting {section_name} section"
+    # Create summary prompt
+    summary_prompt = ChatPromptTemplate.from_template("""
+    Summarize this build vs buy analysis report into key points for a presentation. 
+    For each section, provide 3-4 bullet points of the most important insights.
     
-    def get_sections(content: str) -> list[str]:
-        sections = []
-        for line in content.split('\n'):
-            if line.startswith('## '):
-                sections.append(line.replace('## ', '').strip())
-        return sections
+    Format the output as:
     
-    sections = get_sections(report_content)
+    Executive Summary:
+    - [3 key takeaways from entire report]
     
-    slides = [f"""---
+    Buy Options:
+    - [key points about buy options]
+    
+    Build Options:
+    - [key points about build options]
+    
+    Recommendation:
+    - [final recommendation and rationale]
+    
+    Report content:
+    {report_content}
+    """)
+    
+    # Generate summary
+    chain = summary_prompt | summarizer | StrOutputParser()
+    summary = await chain.ainvoke({"report_content": report_content})
+    
+    # Create slides content
+    slides = [
+        f"""---
 marp: true
 theme: default
 paginate: true
+backgroundColor: #fff
 ---
 
-# Build vs Buy Analysis: {capability}
-<!-- _class: lead -->"""]
+<!-- _class: lead -->
+# Build vs Buy Analysis
+## {capability}
+""",
+        """---
+# Executive Summary
+"""
+    ]
     
-    for section in sections:
-        slides.append(f"""
----
-
-## {section}
-
-{extract_section(report_content, section)}""")
+    # Process summary into slides
+    current_section = None
+    current_points = []
     
-    md_content = "\n".join(slides)
+    for line in summary.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+            
+        if line.endswith(':'):  # This is a section header
+            # Add previous section if it exists
+            if current_section and current_points:
+                slides.append("\n".join([f"# {current_section}", *current_points, "---"]))
+                current_points = []
+            current_section = line[:-1]  # Remove the colon
+        elif line.startswith('- '):
+            current_points.append(line)
+            
+            # Create new slide if we have 4 points
+            if len(current_points) == 4:
+                slides.append("\n".join([f"# {current_section}", *current_points, "---"]))
+                current_points = []
+                if current_section:  # Add continued header for next slide
+                    current_section = f"{current_section} (continued)"
+    
+    # Add remaining points
+    if current_section and current_points:
+        slides.append("\n".join([f"# {current_section}", *current_points]))
+    
+    # Add a final recommendation slide
+    slides.append("""---
+# Next Steps
+
+- Review the detailed analysis in the full report
+- Engage with stakeholders for feedback
+- Create implementation timeline
+- Define success metrics
+""")
+    
+    # Write to markdown file
+    md_content = "\n\n".join(slides)
     md_file.write_text(md_content)
     
     try:

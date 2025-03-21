@@ -1,12 +1,12 @@
 import re
-from langchain.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema.runnable import RunnablePassthrough
 from langchain.schema.output_parser import StrOutputParser
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores.qdrant import Qdrant
+from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 import os
@@ -38,10 +38,10 @@ def create_retriever_from_file(file_path: str, collection_name: str = "buildorbu
     )
     
     # Create vector store
-    vectorstore = Qdrant(
+    vectorstore = QdrantVectorStore(
         client=client,
         collection_name=collection_name,
-        embeddings=embeddings,
+        embedding=embeddings,
     )
     
     # Add documents
@@ -80,7 +80,10 @@ def extract_capability(retriever) -> dict:
     """
     
     prompt = ChatPromptTemplate.from_template(template)
-    model = ChatOpenAI()
+    model = ChatOpenAI(
+        model="gpt-4-1106-preview",
+        temperature=0
+    )
     
     rag_chain = (
         {"context": retriever, "question": RunnablePassthrough()}

@@ -1,0 +1,195 @@
+
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_community.document_loaders import TextLoader, PyPDFLoader
+from langchain_qdrant import QdrantVectorStore
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema import StrOutputParser
+from langchain.schema.runnable import RunnablePassthrough
+import re
+import os
+
+def create_retriever_from_file(file_path: str, collection_name: str = "buildorbuy_docs"):
+    """
+    Creates a retriever from a file by:
+    1. Loading the document
+    2. Splitting it into chunks
+    3. Creating embeddings
+    4. Storing in Qdrant (in-memory)
+    5. Creating and returning a retriever
+
+    Args:
+        file_path (str): Path to the file
+        collection_name (str): Name for the Qdrant collection
+
+    Returns:
+        retriever: A langchain retriever object
+    """
+    # Determine file type and load document
+    file_extension = os.path.splitext(file_path)[1].lower()
+    if file_extension == '.pdf':
+        loader = PyPDFLoader(file_path)
+    elif file_extension in ['.txt', '.md', '.py']:
+        loader = TextLoader(file_path)
+    else:
+        raise ValueError(f"Unsupported file type: {file_extension}")
+    
+    documents = loader.load()
+    
+    # Split documents into smaller chunks with more overlap
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,          # Smaller chunks (500 characters)
+        chunk_overlap=50,        # 50 character overlap
+        length_function=len,
+        separators=["\n\n", "\n", " ", ""],  # Custom separators
+        is_separator_regex=False
+    )
+    splits = text_splitter.split_documents(documents)
+    
+    #print(f"Split {len(documents)} documents into {len(splits)} chunks")
+    
+    """"
+    # Print first few chunks to verify splitting
+    for i, split in enumerate(splits[:3]):
+        print(f"\nChunk {i+1}:")
+        print("Content:", split.page_content[:200], "...")  # First 200 chars
+        print("Metadata:", split.metadata)
+    """""
+    # Initialize embeddings
+    embeddings = OpenAIEmbeddings()
+    
+    # Create in-memory Qdrant instance
+    client = QdrantClient(":memory:")
+    
+    # Create collection with the same dimensionality as OpenAI embeddings (1536 for text-embedding-ada-002)
+    client.create_collection(
+        collection_name=collection_name,
+        vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
+    )
+    
+    # Create Qdrant vector store
+    vector_store = QdrantVectorStore(
+        client=client,
+        collection_name=collection_name,
+        embedding=embeddings,
+    )
+    
+    # Add documents to the vector store
+    vector_store.add_documents(splits)
+    
+    # Create and return retriever
+    retriever = vector_store.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": 5}
+    )
+    
+    return retriever
+
+import os
+os.environ['TK_SILENCE_DEPRECATION'] = '1'  # Suppress IMK message
+
+# Rest of your imports
+from pathlib import Path
+import re
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
+import uuid
+import asyncio
+from IPython.display import Markdown, display
+
+def select_file():
+    """
+    Opens a file dialog to select a file and returns the file path.
+    Falls back to command line input if tkinter is not available.
+    Supports .pdf, .txt, and .md files.
+    """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        
+        root = tk.Tk()
+        root.withdraw()
+
+        file_path = filedialog.askopenfilename(
+            title="Select a file",
+            filetypes=[
+                ("PDF files", "*.pdf"),
+                ("Text files", "*.txt"),
+                ("Markdown files", "*.md"),
+                ("All files", "*.*")
+            ]
+        )
+        
+    except ImportError:
+        print("\nTkinter is not available. Please enter the file path manually.")
+        print("Example: /path/to/your/file.txt")
+        file_path = input("\nEnter file path: ").strip()
+    
+    if not file_path:
+        raise ValueError("No file selected")
+    
+    if not os.path.exists(file_path):
+        raise ValueError(f"File not found: {file_path}")
+        
+    return file_path
+
+def extract_capability(retriever):
+    """
+    Creates and runs a RAG chain to extract a capability from user stories.
+    
+    Args:
+        retriever: A document retriever initialized with the source content
+        
+    Returns:
+        dict: A dictionary containing the system description and the extracted capability name
+    """
+    template = """Based on the extracted user stories, please name one capability.
+
+    Here's the format I want you to follow:
+
+    Context: "As a user, I want to be able to view my monthly bill, so that I can understand my charges."
+    System Description: "This is a billing system that allows users to view their monthly bill."
+    Capability: "Billing Management"
+
+    Rules for the capability name:
+    - Keep it short and no more than 3 words
+    - Use simple, clear terms
+    - Keep it business focused and not technical
+    - You can words like "Management", "System", "Module"
+    - Make it concise and focused
+
+    Now, based on these user stories, please describe the system and identify one key capability:
+    {context}
+
+    Question: {question}
+
+    Output your response in exactly this format:
+    System Description: "<system_description>"
+    Capability: "<capability_name>"
+    """
+    prompt = ChatPromptTemplate.from_template(template)
+    model = ChatOpenAI()
+
+    rag_chain = (
+        {"context": retriever, "question": RunnablePassthrough()}
+        | prompt
+        | model
+        | StrOutputParser()
+    )
+
+    # Use the chain
+    response = rag_chain.invoke("What is the one capability that is most relevant to the user stories?")
+    
+    # Extract both system description and capability
+    system_match = re.search(r'System Description:\s*"([^"]+)"', response)
+    capability_match = re.search(r'Capability:\s*"([^"]+)"', response)
+    
+    if not system_match or not capability_match:
+        raise ValueError("Could not extract system description or capability from response")
+    
+    return {
+        "system_description": system_match.group(1),
+        "capability": capability_match.group(1)
+    }
